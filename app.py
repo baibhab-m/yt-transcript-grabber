@@ -51,7 +51,14 @@ def _has_cookies() -> bool:
 
 
 def _build_session() -> requests.Session | None:
-    """Build a requests.Session with cookies loaded from COOKIES_FILE."""
+    """Build a requests.Session with cookies loaded from COOKIES_FILE.
+
+    Important: assigning a MozillaCookieJar directly to session.cookies
+    silently fails for *outgoing* requests in some requests versions
+    (it accepts any cookielib jar but doesn't always use it for sending).
+    The bulletproof pattern is to copy each cookie into the session's
+    own RequestsCookieJar via .set().
+    """
     if not _has_cookies():
         return None
     cj = MozillaCookieJar(COOKIES_FILE)
@@ -60,18 +67,31 @@ def _build_session() -> requests.Session | None:
     except Exception:
         return None
     s = requests.Session()
-    s.cookies = cj
+    for c in cj:
+        s.cookies.set(c.name, c.value, domain=c.domain, path=c.path or "/")
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/120.0.0.0 Safari/537.36"
+                      "Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
     })
     return s
 
 
 def _ydl_opts(extra: dict | None = None) -> dict:
-    """Base yt-dlp options. Adds cookies file if available."""
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    """Base yt-dlp options. Adds cookies file if available.
+
+    Sets format='bestaudio/best' so yt-dlp's format selector doesn't fail
+    when extracting subtitles only. Even with skip_download=True, yt-dlp
+    runs format selection during extract_info/download and will throw
+    'Requested format is not available' on some videos without an explicit
+    format. We're not actually downloading anything, so this is harmless.
+    """
+    opts = {
+        "quiet": True, "no_warnings": True, "skip_download": True,
+        "format": "bestaudio/best",
+        "ignoreerrors": False,  # surface errors to our retry layer
+    }
     if _has_cookies():
         opts["cookiefile"] = COOKIES_FILE
     if extra:
@@ -155,31 +175,102 @@ def vtt_to_text(vtt: str) -> str:
 
 
 def fetch_transcript_fallback(vid: str, tmpdir: Path) -> str:
-    tmpdir.mkdir(parents=True, exist_ok=True)
-    opts = _ydl_opts({
-        "writesubtitles": True, "writeautomaticsub": True,
-        "subtitleslangs": ["en.*"], "subtitlesformat": "vtt",
-        "outtmpl": str(tmpdir / "%(id)s.%(ext)s"),
-    })
-    def _try():
+    """Bypass yt-dlp's format-selection entirely.
+
+    The path that worked in v2 (ydl.download() with writesubtitles=True)
+    fails with 'Requested format is not available' on many videos because
+    yt-dlp's format selector still runs even with skip_download=True, and
+    no format ever matches for some videos.
+
+    Trick: extract_info(process=False) returns raw player-response data
+    *without* running format selection. That raw data still contains the
+    subtitle URLs we need. We then download the subtitle text ourselves
+    with requests + the same cookie session, and parse it.
+
+    The tmpdir parameter is kept for backwards compatibility but unused.
+    """
+    opts = _ydl_opts({})
+    opts.pop("format", None)  # not needed for process=False
+
+    def _extract():
         with YoutubeDL(opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={vid}"])
+            return ydl.extract_info(
+                f"https://www.youtube.com/watch?v={vid}",
+                download=False, process=False,
+            )
+
     try:
-        _try()
+        info = _extract()
     except Exception as e:
         if _is_blocked_error(e):
             time.sleep(RETRY_BACKOFF_SEC)
-            _try()
+            info = _extract()
         else:
             raise
-    vtts = sorted(tmpdir.glob(f"{vid}*.vtt"))
-    if not vtts:
+
+    subs = info.get("subtitles") or {}
+    autos = info.get("automatic_captions") or {}
+    pool = subs if subs else autos
+    if not pool:
         raise RuntimeError("no captions available")
-    text = vtt_to_text(vtts[0].read_text(encoding="utf-8", errors="ignore"))
-    for f in vtts:
-        try: f.unlink()
-        except OSError: pass
-    return text
+
+    # Prefer "en" over "en-orig", then any en-*, then any language
+    en_key = next((k for k in pool if k.lower() == "en"), None) \
+             or next((k for k in pool if k.lower().startswith("en")
+                      and k.lower() != "en-orig"), None) \
+             or next((k for k in pool if k.lower().startswith("en")), None) \
+             or next(iter(pool))
+
+    formats = pool[en_key]
+    # Prefer json3 (clean structured JSON), then srv1 (XML), then vtt
+    chosen = (
+        next((f for f in formats if f.get("ext") == "json3"), None)
+        or next((f for f in formats if f.get("ext") == "srv1"), None)
+        or next((f for f in formats if f.get("ext") == "vtt"), None)
+        or (formats[0] if formats else None)
+    )
+    if not chosen or not chosen.get("url"):
+        raise RuntimeError("no subtitle URL in available formats")
+
+    sess = _build_session() or requests.Session()
+    sess.headers.setdefault(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    )
+    r = sess.get(chosen["url"], timeout=30)
+    r.raise_for_status()
+    body = r.text
+    ext = chosen.get("ext")
+
+    if ext == "json3":
+        import json as _json
+        try:
+            data = _json.loads(body)
+        except Exception:
+            return body
+        out = []
+        for event in data.get("events", []):
+            for seg in (event.get("segs") or []):
+                t = seg.get("utf8", "")
+                if t and t != "\n":
+                    out.append(t)
+        return "".join(out).strip()
+
+    if ext in ("srv1", "srv2", "srv3", "ttml"):
+        import xml.etree.ElementTree as ET
+        try:
+            root = ET.fromstring(body)
+            return " ".join((t.text or "").strip()
+                            for t in root.iter()
+                            if (t.text or "").strip())
+        except Exception:
+            return body
+
+    if ext == "vtt":
+        return vtt_to_text(body)
+
+    return body
 
 
 def _pick_snippet(text: str) -> str:
