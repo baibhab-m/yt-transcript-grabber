@@ -296,7 +296,12 @@ def run_job(job_id: str, df: pd.DataFrame, link_col: str):
                 r = results[idx]
                 tag = "OK" if r["status"] == "ok" else "FAIL"
                 label = (r["channel"] + " - " + r["title"][:50]) if r["channel"] else (r["video_id"] or "?")
-                job["log"].append(f"[{tag}] {label}")
+                # Always surface the actual status so failures are self-diagnosing
+                # (otherwise users just see [FAIL] <vid> with no clue what broke).
+                line = f"[{tag}] {label}"
+                if r["status"] != "ok":
+                    line += f"  -- {r['status']}"
+                job["log"].append(line)
                 # Live stats for the wait page
                 txt = r.get("transcript", "")
                 if txt:
