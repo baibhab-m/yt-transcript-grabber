@@ -95,11 +95,15 @@ The app will now make requests as your logged-in self, which YouTube treats much
 
 - **Some videos have no captions at all.** Those rows will come back with `status=no-captions`. There's nothing the tool can do, the captions just don't exist on YouTube.
 - **Don't run this from a cloud server.** YouTube blocks AWS/GCP/Azure IPs almost immediately, no amount of cookies will fix that. Local laptops are fine.
+- **If everything still fails with `ip-blocked` even with cookies set up**, your home IP has been temporarily 429-throttled by YouTube's transcript endpoint specifically. This is a per-IP throttle, not per-account, so cookies/VPN-into-cloud don't fix it. The fastest workarounds:
+  1. **Phone hotspot** — connect your laptop to a phone hotspot (cellular IP), run the batch, switch back. ~5 min setup.
+  2. **Consumer VPN** (ProtonVPN free tier or similar) — switch to a residential-looking exit. Cloudflare WARP, AWS, GCP, Azure are already blocked.
+  3. **Wait 1–24 hours** — 429s are transient. Try again the next day.
 - **Status column meanings:**
   - `ok` - transcript and metadata both fetched
   - `metadata-only` - transcript fetched, metadata blocked (still useful)
   - `no-captions` - the video genuinely has no captions
-  - `ip-blocked` - YouTube refused both endpoints (set up cookies, see above)
+  - `ip-blocked` - YouTube refused both endpoints (try a different IP, see above)
   - `invalid-link` - couldn't extract a video ID from that row
 
 ## License
