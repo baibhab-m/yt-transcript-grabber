@@ -6,12 +6,19 @@ Drop a CSV of YouTube links, get back a CSV with the channel, video title, and f
 
 ## What it looks like
 
-A small local web page in your browser:
+A small local web page in your browser with two tabs:
 
+### Tab 1: Upload CSV
 1. Drop a CSV (or click to pick one).
 2. It auto-detects the column with YouTube links. Override if needed.
 3. Click **Get transcripts**. Watch the progress bar.
-4. Click **Download CSV** when it's done. The output has your original columns plus `video_id`, `channel`, `title`, `transcript`, and `status`.
+4. Click **Download CSV**. Output has your original columns plus `video_id`, `channel`, `title`, `transcript`, and `status`.
+
+### Tab 2: Browse a channel
+1. Paste a channel URL or just `@handle` (e.g. `@hubermanlab`).
+2. Click **Load videos**. You get a grid of thumbnails with title, duration, and view count.
+3. Click cards to select. Use the search box to filter, or **Select all**.
+4. Click **Get transcripts for selected**. Same downloadable CSV at the end.
 
 Nothing leaves your machine except the YouTube requests themselves.
 

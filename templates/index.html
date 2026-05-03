@@ -14,7 +14,12 @@
     <p class="sub">Drop a CSV of YouTube links. Get a CSV with channel, title, and transcript filled in.</p>
   </header>
 
-  <section class="card" id="step-upload">
+  <div class="tabs">
+    <button class="tab active" data-tab="csv">Upload CSV</button>
+    <button class="tab" data-tab="channel">Browse a channel</button>
+  </div>
+
+  <section class="card tabpane" id="step-upload" data-tab="csv">
     <div id="drop" class="drop">
       <div class="drop-icon">↑</div>
       <div class="drop-title">Drop a CSV here</div>
@@ -22,6 +27,30 @@
       <input type="file" id="file" accept=".csv,text/csv" hidden>
     </div>
     <div id="file-info" class="file-info" hidden></div>
+  </section>
+
+  <section class="card tabpane hidden" id="step-channel" data-tab="channel">
+    <h2>Pick videos from a channel</h2>
+    <p class="muted" style="margin-top:-6px">Paste a channel URL, or just <code>@handle</code>.</p>
+    <div class="row">
+      <input id="channel-url" type="text" placeholder="@lexfridman or https://youtube.com/@hubermanlab" />
+      <input id="channel-limit" type="number" value="50" min="1" max="500" title="How many recent videos to load" style="max-width:90px" />
+      <button class="btn primary" id="load-channel-btn">Load videos</button>
+    </div>
+    <div id="channel-status" class="muted" style="margin-top:10px"></div>
+
+    <div id="channel-results" class="hidden" style="margin-top:20px">
+      <div class="row" style="margin-bottom:12px">
+        <input id="filter-input" type="text" placeholder="Filter by title..." style="flex:1" />
+        <button class="btn ghost" id="select-all-btn">Select all</button>
+        <button class="btn ghost" id="clear-all-btn">Clear</button>
+      </div>
+      <div class="grid" id="video-grid"></div>
+      <div class="row" style="margin-top:18px;justify-content:space-between">
+        <div class="muted" id="selection-count">0 selected</div>
+        <button class="btn primary" id="run-selection-btn" disabled>Get transcripts for selected</button>
+      </div>
+    </div>
   </section>
 
   <section class="card hidden" id="step-column">

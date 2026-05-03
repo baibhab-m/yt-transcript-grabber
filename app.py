@@ -254,6 +254,88 @@ def download(job_id):
                      mimetype="text/csv")
 
 
+def _format_duration(secs) -> str:
+    if not secs: return ""
+    secs = int(secs)
+    h, rem = divmod(secs, 3600); m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _format_views(n) -> str:
+    if not n: return ""
+    n = int(n)
+    if n >= 1_000_000: return f"{n/1_000_000:.1f}M views"
+    if n >= 1_000:     return f"{n/1_000:.1f}K views"
+    return f"{n} views"
+
+
+@app.route("/channel", methods=["POST"])
+def channel():
+    """Fetch a channel's video list (flat, fast)."""
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get("url") or "").strip()
+    limit = int(data.get("limit") or 100)
+    if not url:
+        return jsonify({"error": "no channel URL"}), 400
+    # nudge plain handles like @lexfridman or channel handles
+    if url.startswith("@"):
+        url = f"https://www.youtube.com/{url}/videos"
+    elif "youtube.com" not in url and "youtu.be" not in url:
+        url = f"https://www.youtube.com/@{url.lstrip('@')}/videos"
+    # ensure /videos for channel pages so we get uploads
+    if "youtube.com/" in url and "/videos" not in url and "/playlist" not in url and "watch?" not in url:
+        url = url.rstrip("/") + "/videos"
+
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+            "extract_flat": "in_playlist", "playlistend": limit}
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        return jsonify({"error": f"couldn't load channel: {type(e).__name__}: {e}"}), 400
+
+    entries = info.get("entries") or []
+    videos = []
+    for e in entries:
+        if not e: continue
+        vid = e.get("id")
+        if not vid or len(vid) != 11: continue
+        videos.append({
+            "video_id": vid,
+            "title": e.get("title") or "",
+            "duration": _format_duration(e.get("duration")),
+            "views": _format_views(e.get("view_count")),
+            "thumbnail": f"https://i.ytimg.com/vi/{vid}/mqdefault.jpg",
+        })
+    return jsonify({
+        "channel_title": info.get("channel") or info.get("uploader") or info.get("title") or "",
+        "channel_url": info.get("channel_url") or info.get("webpage_url") or url,
+        "count": len(videos),
+        "videos": videos,
+    })
+
+
+@app.route("/start_from_ids", methods=["POST"])
+def start_from_ids():
+    """Kick off a transcript job from a list of video IDs (no CSV upload)."""
+    data = request.get_json(force=True, silent=True) or {}
+    ids = [v for v in (data.get("video_ids") or []) if isinstance(v, str) and ID_RE.match(v)]
+    if not ids:
+        return jsonify({"error": "no valid video IDs"}), 400
+    df = pd.DataFrame({"youtube_link": [f"https://youtu.be/{v}" for v in ids]})
+
+    job_id = uuid.uuid4().hex[:12]
+    tmpdir = Path.home() / "Downloads" / "YouTubeTranscripts" / job_id
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    JOBS[job_id] = {"status": "running", "done": 0, "total": len(df),
+                    "tmpdir": str(tmpdir), "log": [], "output": None,
+                    "started": datetime.now().isoformat(timespec="seconds"),
+                    "link_col": "youtube_link"}
+    threading.Thread(target=run_job, args=(job_id, df, "youtube_link"),
+                     daemon=True).start()
+    return jsonify({"job_id": job_id, "total": len(df)})
+
+
 @app.route("/columns", methods=["POST"])
 def columns():
     """Preview columns of an uploaded CSV without starting a job."""
