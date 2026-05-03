@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YouTube Transcript Grabber</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Hello, {{ greeting_name }}.</h1>
+    <p class="sub">Drop a CSV of YouTube links. Get a CSV with channel, title, and transcript filled in.</p>
+  </header>
+
+  <section class="card" id="step-upload">
+    <div id="drop" class="drop">
+      <div class="drop-icon">↑</div>
+      <div class="drop-title">Drop a CSV here</div>
+      <div class="drop-sub">or click to choose a file</div>
+      <input type="file" id="file" accept=".csv,text/csv" hidden>
+    </div>
+    <div id="file-info" class="file-info" hidden></div>
+  </section>
+
+  <section class="card hidden" id="step-column">
+    <h2>Which column has the YouTube links?</h2>
+    <p class="muted" id="column-guess"></p>
+    <div class="row">
+      <select id="link-col"></select>
+      <button class="btn primary" id="start-btn">Get transcripts</button>
+    </div>
+  </section>
+
+  <section class="card hidden" id="step-progress">
+    <h2 id="progress-title">Working...</h2>
+    <div class="bar"><div class="fill" id="bar-fill"></div></div>
+    <div class="meta" id="bar-meta">0 / 0</div>
+    <details class="log-wrap">
+      <summary>Show details</summary>
+      <pre id="log"></pre>
+    </details>
+  </section>
+
+  <section class="card hidden" id="step-done">
+    <h2>Done!</h2>
+    <p>Your CSV is ready. It includes the original columns plus <code>video_id</code>, <code>channel</code>, <code>title</code>, <code>transcript</code>, and <code>status</code>.</p>
+    <div class="row">
+      <button class="btn primary" id="download-btn">Download CSV</button>
+      <button class="btn ghost" id="restart-btn">Do another</button>
+    </div>
+  </section>
+
+  <footer>
+    Runs locally on this laptop. Nothing leaves your machine except the YouTube requests themselves.
+  </footer>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
