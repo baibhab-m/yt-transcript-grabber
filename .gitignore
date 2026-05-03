@@ -7,3 +7,6 @@ build/
 dist/
 *.spec
 output_test.csv
+cookies.txt
+out_v2_test/
+*.cookies.txt

@@ -9,10 +9,12 @@ from __future__ import annotations
 import io, os, re, sys, time, uuid, random, threading, webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
+import requests
 from flask import Flask, render_template, request, jsonify, send_file, abort
 
 from yt_dlp import YoutubeDL
@@ -23,11 +25,65 @@ from youtube_transcript_api._errors import (
 
 # ---------- config ----------
 GREETING_NAME = "Yashvardhan"
-MAX_WORKERS = 4
-JITTER_RANGE = (0.3, 0.9)
+# Conservative defaults: YouTube ramped up bot detection in 2025-26 and 4
+# parallel workers with sub-second jitter is enough to get ip-blocked on
+# fresh residential IPs. Two workers + 1.5-3.5s jitter behaves like a
+# casual human and survives 100+ video batches.
+MAX_WORKERS = int(os.environ.get("YT_WORKERS", "1"))
+JITTER_RANGE = (3.0, 7.0)
+# Path to a Netscape-format cookies.txt file. If present, both youtube-
+# transcript-api and yt-dlp use it, which makes YouTube treat us as a
+# logged-in user instead of an anonymous scraper. This is the only
+# reliable way to fix IpBlocked errors on residential ISPs that YouTube
+# has flagged. Default location: cookies.txt next to this file. Override
+# with YT_COOKIES_FILE env var.
+APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+COOKIES_FILE = os.environ.get("YT_COOKIES_FILE",
+                              str(APP_DIR / "cookies.txt"))
+# How long to back off after an IpBlocked / DownloadError, then try once more.
+RETRY_BACKOFF_SEC = 30
 PREFERRED_LANGS = ["en", "en-US", "en-GB"]
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
-APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+
+
+def _has_cookies() -> bool:
+    return bool(COOKIES_FILE) and Path(COOKIES_FILE).is_file() and Path(COOKIES_FILE).stat().st_size > 100
+
+
+def _build_session() -> requests.Session | None:
+    """Build a requests.Session with cookies loaded from COOKIES_FILE."""
+    if not _has_cookies():
+        return None
+    cj = MozillaCookieJar(COOKIES_FILE)
+    try:
+        cj.load(ignore_discard=True, ignore_expires=True)
+    except Exception:
+        return None
+    s = requests.Session()
+    s.cookies = cj
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36"
+    })
+    return s
+
+
+def _ydl_opts(extra: dict | None = None) -> dict:
+    """Base yt-dlp options. Adds cookies file if available."""
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    if _has_cookies():
+        opts["cookiefile"] = COOKIES_FILE
+    if extra:
+        opts.update(extra)
+    return opts
+
+
+def _is_blocked_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(s in msg for s in ("ipblocked", "ip blocked", "sign in to confirm",
+                                   "http error 429", "too many requests",
+                                   "blocked", "rate"))
 
 app = Flask(__name__,
             template_folder=str(APP_DIR / "templates"),
@@ -59,10 +115,11 @@ def extract_id(s) -> str | None:
 
 
 def get_metadata(vid: str) -> dict:
-    with YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True,
-                    "extract_flat": False}) as ydl:
+    """Fetch only title + channel; skip format probing (it's pointless here
+    and trips up yt-dlp when cookies are from mobile YouTube)."""
+    with YoutubeDL(_ydl_opts({"extract_flat": False})) as ydl:
         info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}",
-                                download=False)
+                                download=False, process=False)
     return {
         "title": info.get("title") or "",
         "channel": info.get("channel") or info.get("uploader") or "",
@@ -70,8 +127,17 @@ def get_metadata(vid: str) -> dict:
 
 
 def fetch_transcript(vid: str) -> str:
-    api = YouTubeTranscriptApi()
-    fetched = api.fetch(vid, languages=PREFERRED_LANGS)
+    """Try once, on a blocked-style error sleep and retry once more."""
+    session = _build_session()
+    api = YouTubeTranscriptApi(http_client=session) if session else YouTubeTranscriptApi()
+    try:
+        fetched = api.fetch(vid, languages=PREFERRED_LANGS)
+    except Exception as e:
+        if _is_blocked_error(e):
+            time.sleep(RETRY_BACKOFF_SEC)
+            fetched = api.fetch(vid, languages=PREFERRED_LANGS)
+        else:
+            raise
     return " ".join(s.text.strip() for s in fetched.snippets if s.text.strip())
 
 
@@ -90,12 +156,22 @@ def vtt_to_text(vtt: str) -> str:
 
 def fetch_transcript_fallback(vid: str, tmpdir: Path) -> str:
     tmpdir.mkdir(parents=True, exist_ok=True)
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True,
-            "writesubtitles": True, "writeautomaticsub": True,
-            "subtitleslangs": ["en.*"], "subtitlesformat": "vtt",
-            "outtmpl": str(tmpdir / "%(id)s.%(ext)s")}
-    with YoutubeDL(opts) as ydl:
-        ydl.download([f"https://www.youtube.com/watch?v={vid}"])
+    opts = _ydl_opts({
+        "writesubtitles": True, "writeautomaticsub": True,
+        "subtitleslangs": ["en.*"], "subtitlesformat": "vtt",
+        "outtmpl": str(tmpdir / "%(id)s.%(ext)s"),
+    })
+    def _try():
+        with YoutubeDL(opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={vid}"])
+    try:
+        _try()
+    except Exception as e:
+        if _is_blocked_error(e):
+            time.sleep(RETRY_BACKOFF_SEC)
+            _try()
+        else:
+            raise
     vtts = sorted(tmpdir.glob(f"{vid}*.vtt"))
     if not vtts:
         raise RuntimeError("no captions available")
@@ -106,27 +182,65 @@ def fetch_transcript_fallback(vid: str, tmpdir: Path) -> str:
     return text
 
 
+def _pick_snippet(text: str) -> str:
+    """Return one good sentence from a transcript for the wait-page quote card."""
+    if not text: return ""
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    candidates = [s.strip() for s in sentences if 80 <= len(s.strip()) <= 220]
+    if not candidates:
+        candidates = [s.strip() for s in sentences if 60 <= len(s.strip()) <= 280]
+    if not candidates:
+        return text[:200].strip() + ("..." if len(text) > 200 else "")
+    return random.choice(candidates)
+
+
+def _classify_error(e1: Exception, e2: Exception | None) -> str:
+    """Turn raw exception types into a friendlier status label."""
+    n1 = type(e1).__name__
+    if n1 in ("TranscriptsDisabled", "NoTranscriptFound", "VideoUnavailable"):
+        if e2 is None: return "no-captions"
+        if _is_blocked_error(e2): return "ip-blocked"
+        return f"no-captions ({type(e2).__name__})"
+    if _is_blocked_error(e1) and (e2 is None or _is_blocked_error(e2)):
+        return "ip-blocked"
+    if e2 is None:
+        return f"error: {n1}"
+    return f"error: {n1}/{type(e2).__name__}"
+
+
 def process_one(vid: str, tmpdir: Path) -> dict:
+    """Transcript first, metadata second.
+
+    If transcript fetching is the only thing the user needs, no point
+    burning a metadata request that might trigger a block before we
+    even get to the actual transcript. On success we backfill metadata
+    best-effort: if it blocks, the row still has the transcript and a
+    'metadata-only' status.
+    """
     out = {"video_id": vid, "channel": "", "title": "", "transcript": "", "status": "ok"}
     time.sleep(random.uniform(*JITTER_RANGE))
+
+    # 1. Transcript via primary, then yt-dlp fallback on any failure
+    e1, e2 = None, None
+    try:
+        out["transcript"] = fetch_transcript(vid)
+    except Exception as exc1:
+        e1 = exc1
+        try:
+            out["transcript"] = fetch_transcript_fallback(vid, tmpdir)
+        except Exception as exc2:
+            e2 = exc2
+
+    if not out["transcript"]:
+        out["status"] = _classify_error(e1, e2)
+        return out
+
+    # 2. Metadata best-effort. Don't fail the row if metadata blocks.
     try:
         m = get_metadata(vid)
         out["channel"], out["title"] = m["channel"], m["title"]
     except Exception as e:
-        out["status"] = f"metadata-error: {type(e).__name__}"
-
-    try:
-        out["transcript"] = fetch_transcript(vid)
-    except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e1:
-        try:
-            out["transcript"] = fetch_transcript_fallback(vid, tmpdir)
-        except Exception as e2:
-            out["status"] = f"no-transcript: {type(e1).__name__}/{type(e2).__name__}"
-    except Exception as e:
-        try:
-            out["transcript"] = fetch_transcript_fallback(vid, tmpdir)
-        except Exception as e2:
-            out["status"] = f"error: {type(e).__name__}/{type(e2).__name__}"
+        out["status"] = "metadata-only" if _is_blocked_error(e) else f"metadata-error: {type(e).__name__}"
     return out
 
 
@@ -183,6 +297,18 @@ def run_job(job_id: str, df: pd.DataFrame, link_col: str):
                 tag = "OK" if r["status"] == "ok" else "FAIL"
                 label = (r["channel"] + " - " + r["title"][:50]) if r["channel"] else (r["video_id"] or "?")
                 job["log"].append(f"[{tag}] {label}")
+                # Live stats for the wait page
+                txt = r.get("transcript", "")
+                if txt:
+                    job["words_total"] = job.get("words_total", 0) + len(txt.split())
+                    snippet = _pick_snippet(txt)
+                    if snippet:
+                        job["snippets"].append({
+                            "quote": snippet,
+                            "channel": r.get("channel") or "",
+                            "title": r.get("title") or "",
+                            "video_id": r.get("video_id", ""),
+                        })
 
     # build output dataframe: original cols + new cols
     new_cols = ["video_id", "channel", "title", "transcript", "status"]
@@ -230,7 +356,7 @@ def upload():
     JOBS[job_id] = {"status": "running", "done": 0, "total": len(df),
                     "tmpdir": str(tmpdir), "log": [], "output": None,
                     "started": datetime.now().isoformat(timespec="seconds"),
-                    "link_col": link_col}
+                    "link_col": link_col, "words_total": 0, "snippets": []}
     threading.Thread(target=run_job, args=(job_id, df, link_col),
                      daemon=True).start()
     return jsonify({"job_id": job_id, "total": len(df), "link_col": link_col})
@@ -242,7 +368,9 @@ def status(job_id):
     if not job: abort(404)
     return jsonify({"status": job["status"], "done": job["done"],
                     "total": job["total"], "log": job["log"][-20:],
-                    "link_col": job.get("link_col")})
+                    "link_col": job.get("link_col"),
+                    "words_total": job.get("words_total", 0),
+                    "snippets": job.get("snippets", [])[-15:]})
 
 
 @app.route("/download/<job_id>")
@@ -286,8 +414,7 @@ def channel():
     if "youtube.com/" in url and "/videos" not in url and "/playlist" not in url and "watch?" not in url:
         url = url.rstrip("/") + "/videos"
 
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True,
-            "extract_flat": "in_playlist", "playlistend": limit}
+    opts = _ydl_opts({"extract_flat": "in_playlist", "playlistend": limit})
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -330,7 +457,8 @@ def start_from_ids():
     JOBS[job_id] = {"status": "running", "done": 0, "total": len(df),
                     "tmpdir": str(tmpdir), "log": [], "output": None,
                     "started": datetime.now().isoformat(timespec="seconds"),
-                    "link_col": "youtube_link"}
+                    "link_col": "youtube_link",
+                    "words_total": 0, "snippets": []}
     threading.Thread(target=run_job, args=(job_id, df, "youtube_link"),
                      daemon=True).start()
     return jsonify({"job_id": job_id, "total": len(df)})
@@ -365,7 +493,13 @@ def main():
     port = int(os.environ.get("PORT", "5173"))
     url = f"http://127.0.0.1:{port}"
     print(f"\n  YouTube Transcript Grabber running at {url}")
-    print(f"  Hello {GREETING_NAME}! Open the URL above in your browser if it didn't open automatically.\n")
+    print(f"  Hello {GREETING_NAME}! Open the URL above in your browser if it didn't open automatically.")
+    if _has_cookies():
+        print(f"  Cookies file loaded from: {COOKIES_FILE}")
+    else:
+        print(f"  No cookies file found at {COOKIES_FILE}.")
+        print(f"  Without cookies YouTube may IP-block you on big batches.")
+        print(f"  See README for one-time cookie export instructions.\n")
     open_browser(url)
     app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
 

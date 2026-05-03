@@ -80,11 +80,80 @@ async function poll() {
   $("#bar-fill").style.width = pct.toFixed(1) + "%";
   $("#bar-meta").textContent = `${r.done} / ${r.total} processed`;
   $("#log").textContent = r.log.join("\n");
+
+  // live stats: smooth counter animations
+  animateCounter("#words-counter", r.words_total || 0);
+  animateCounter("#hours-counter", ((r.words_total || 0) / 150 / 60), 1);
+  animateCounter("#videos-counter", r.done || 0);
+
+  // snippet rotation
+  if (r.snippets && r.snippets.length) {
+    latestSnippets = r.snippets;
+    if (!quoteRotateTimer) {
+      showQuote(latestSnippets[latestSnippets.length - 1]);
+      quoteIdx = latestSnippets.length - 1;
+      quoteRotateTimer = setInterval(rotateQuote, 9000);
+    }
+  }
+
   if (r.status === "done") {
     clearInterval(pollTimer);
+    if (quoteRotateTimer) { clearInterval(quoteRotateTimer); quoteRotateTimer = null; }
     $("#progress-title").textContent = "All done.";
     show("done");
   }
+}
+
+// ---------- live counter + quote card ----------
+
+let latestSnippets = [];
+let quoteIdx = -1;
+let quoteRotateTimer = null;
+const counterState = {};  // selector -> {current, target, raf}
+
+function animateCounter(selector, target, decimals = 0) {
+  const el = document.querySelector(selector);
+  if (!el) return;
+  const state = counterState[selector] || { current: 0, raf: null };
+  if (state.target === target) return;
+  state.target = target;
+  if (state.raf) cancelAnimationFrame(state.raf);
+  const start = performance.now();
+  const duration = 700;
+  const from = state.current;
+  function step(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    const value = from + (target - from) * eased;
+    state.current = value;
+    el.textContent = decimals
+      ? value.toFixed(decimals)
+      : Math.round(value).toLocaleString();
+    if (t < 1) state.raf = requestAnimationFrame(step);
+    else state.raf = null;
+  }
+  state.raf = requestAnimationFrame(step);
+  counterState[selector] = state;
+}
+
+function rotateQuote() {
+  if (!latestSnippets.length) return;
+  quoteIdx = (quoteIdx + 1) % latestSnippets.length;
+  showQuote(latestSnippets[quoteIdx]);
+}
+
+function showQuote(s) {
+  const card = $("#quote-card");
+  card.classList.add("fading");
+  setTimeout(() => {
+    $("#quote-text").textContent = s.quote;
+    const channel = escapeHtml(s.channel || "Unknown");
+    const title = escapeHtml(s.title || "");
+    $("#quote-attr").innerHTML = title
+      ? `<strong>${channel}</strong> &middot; <em>${title}</em>`
+      : `<strong>${channel}</strong>`;
+    card.classList.remove("fading");
+  }, 450);
 }
 
 $("#download-btn").addEventListener("click", () => {
@@ -97,6 +166,14 @@ $("#restart-btn").addEventListener("click", () => {
   fileInfo.hidden = true;
   $("#bar-fill").style.width = "0%";
   $("#log").textContent = "";
+  // reset wait-page state so the next run starts fresh
+  latestSnippets = []; quoteIdx = -1;
+  if (quoteRotateTimer) { clearInterval(quoteRotateTimer); quoteRotateTimer = null; }
+  for (const k of Object.keys(counterState)) { delete counterState[k]; }
+  ["#words-counter", "#videos-counter"].forEach(s => { const el = document.querySelector(s); if (el) el.textContent = "0"; });
+  const h = document.querySelector("#hours-counter"); if (h) h.textContent = "0.0";
+  $("#quote-text").textContent = "Warming up...";
+  $("#quote-attr").textContent = "First quote will appear when the first transcript finishes.";
   hide("progress"); hide("done"); hide("column");
   // restore whichever tab is active
   document.querySelectorAll(".tabpane").forEach(p => p.classList.add("hidden"));

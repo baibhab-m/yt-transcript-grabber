@@ -78,11 +78,29 @@ Two-layer fallback:
 
 Concurrent fetcher with 4 worker threads + 0.3-0.9s jitter. On a normal home internet connection this handles a few hundred videos comfortably without rate limits.
 
+## Avoiding YouTube's IP block (RECOMMENDED for batches >20 videos)
+
+YouTube heavily rate-limits anonymous requests in 2025-26. If your batch comes back with all rows showing `status=ip-blocked`, you need to give the app your YouTube login cookies. One-time setup, takes about a minute:
+
+1. In your browser (Chrome, Brave, Edge, or Firefox), install **[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)**. It's open source ([source](https://github.com/kairi003/Get-cookies.txt-LOCALLY)).
+2. Visit youtube.com and make sure you're logged in.
+3. Click the extension icon, then click **Export** (with youtube.com as the active tab).
+4. A `youtube.com_cookies.txt` file downloads.
+5. Move it to the same folder as `app.py` and rename it to `cookies.txt`.
+6. Restart the app. You should see `Cookies file loaded from: ...cookies.txt` in the terminal.
+
+The app will now make requests as your logged-in self, which YouTube treats much more leniently. Cookies last for months. The `cookies.txt` is git-ignored so it never gets committed.
+
 ## Caveats
 
-- **Some videos have no captions at all.** Those rows will come back with `status=no-transcript`. There's nothing the tool can do, the captions just don't exist on YouTube.
-- **Don't run this from a cloud server.** YouTube blocks AWS/GCP/Azure IPs almost immediately. Local laptops are fine.
-- **Very large batches** (thousands of videos at once) may trigger YouTube rate-limiting on your IP. Stick to a few hundred at a time and you're safe.
+- **Some videos have no captions at all.** Those rows will come back with `status=no-captions`. There's nothing the tool can do, the captions just don't exist on YouTube.
+- **Don't run this from a cloud server.** YouTube blocks AWS/GCP/Azure IPs almost immediately, no amount of cookies will fix that. Local laptops are fine.
+- **Status column meanings:**
+  - `ok` - transcript and metadata both fetched
+  - `metadata-only` - transcript fetched, metadata blocked (still useful)
+  - `no-captions` - the video genuinely has no captions
+  - `ip-blocked` - YouTube refused both endpoints (set up cookies, see above)
+  - `invalid-link` - couldn't extract a video ID from that row
 
 ## License
 
