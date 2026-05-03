@@ -84,6 +84,8 @@ async function poll() {
     clearInterval(pollTimer);
     $("#progress-title").textContent = "All done.";
     show("done");
+    // auto-trigger the download so Yashvardhan doesn't have to click
+    window.location.href = "/download/" + jobId;
   }
 }
 
